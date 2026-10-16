@@ -1,0 +1,24 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+#define GFX_BINDLESS_RAY_TRACING
+#include "rt_shared.h"
+#include "gfx_bindless.h"
+
+layout(push_constant) uniform PushConstant
+{
+    TraceConstants pc;
+};
+
+hitAttributeEXT vec2 barycentrics;
+
+void main()
+{
+    Mesh mesh = pc.meshes.values[gl_InstanceCustomIndexEXT];
+    const uvec3 triangle = ReadTriangle(mesh, gl_PrimitiveID);
+    const vec3 weights = Weights(barycentrics);
+    const vec2 uv = ReadVec2(mesh.uvs, triangle.x) * weights.x + ReadVec2(mesh.uvs, triangle.y) * weights.y + ReadVec2(mesh.uvs, triangle.z) * weights.z;
+    const float alpha = mesh.albedo.a * textureLod(textures_2d[nonuniformEXT(mesh.albedo_index)], uv, 0.0).a;
+    if (alpha < mesh.alpha_cutoff)
+        ignoreIntersectionEXT;
+}

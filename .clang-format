@@ -1,0 +1,12 @@
+BasedOnStyle: Microsoft
+UseTab: Never
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 200
+NamespaceIndentation: None
+PointerAlignment: Left
+ReferenceAlignment: Left
+SpacesBeforeTrailingComments: 2
+AlignEscapedNewlines: Right
+BreakBeforeBraces: Allman
+AlwaysBreakTemplateDeclarations: Yes
