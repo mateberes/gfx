@@ -1,0 +1,26 @@
+#version 460
+
+#extension GL_EXT_ray_tracing : require
+#define GFX_BINDLESS_RAY_TRACING
+#include "rt_shared.h"
+#include "gfx_bindless.h"
+
+layout(set = 1, binding = 0) uniform Globals
+{
+    FrameData frame;
+};
+
+layout(push_constant) uniform PushConstant
+{
+    TraceConstants pc;
+};
+
+layout(location = 0) rayPayloadEXT vec3 color;
+
+void main()
+{
+    const vec2 uv = (vec2(gl_LaunchIDEXT.xy) + 0.5) / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0;
+    const vec3 direction = normalize(frame.forward.xyz + uv.x * frame.right.xyz - uv.y * frame.up.xyz);
+    traceRayEXT(tlas[pc.tlas_index], gl_RayFlagsNoneEXT, 0xFF, 0, 0, 0, frame.position.xyz, 0.01, direction, 10000.0, 0);
+    imageStore(write_images_2d[pc.image_index], ivec2(gl_LaunchIDEXT.xy), vec4(color, 1.0));
+}
