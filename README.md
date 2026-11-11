@@ -1,13 +1,13 @@
 # gfx.h
-A fast, single header minimal dependency Vulkan library, written in mostly sane C++.
+A fast, single header minimal dependency Vulkan graphics library, written in mostly sane C++.
 
 C++20 is required for designated initializers, but includes are kept at a minimum.
 
 ## Features
-* Bindless textures, dynamic rendering, push constants and buffer addresses, no descriptor sets to manage
+* Bindless textures, dynamic rendering, push constants and buffer device addresses, no descriptor sets to manage
 * Barriers placed automatically from what each pass reads and writes
 * Structs shared between C++ and GLSL with layout validation
-* Built in GPU memory allocator or VMA
+* Built-in GPU memory allocator or VMA
 * No per frame heap allocations
 * Ray tracing support
 

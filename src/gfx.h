@@ -75,6 +75,7 @@
 #include <bit>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <memory>
@@ -116,7 +117,7 @@
             GFX_LOG_FATAL("assert: %s (%s:%d)", #x, __FILE__, __LINE__);    \
     } while (0)
 
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(__clang__)
 #define GFX_LIFETIMEBOUND [[clang::lifetimebound]]
 #elif defined(_MSC_VER)
 #define GFX_LIFETIMEBOUND [[msvc::lifetimebound]]
@@ -142,8 +143,8 @@ using u16 = unsigned short;
 using i16 = signed short;
 using u32 = unsigned int;
 using i32 = signed int;
-using u64 = unsigned long long int;
-using i64 = signed long long int;
+using u64 = std::uint64_t;
+using i64 = std::int64_t;
 using f32 = float;
 using f64 = double;
 
@@ -2749,7 +2750,7 @@ struct alignas(128) Device
     CommandBuffer RecordUploadCommands(u64 timeline_value);
     u64 FlushUploads();
 
-    bool RecreateSwapchain();
+    bool RecreateSwapchainIfNeeded();
     void Present();
 
     void SetEnabledFeatures(const DeviceConfig& config, Feature optional_features);
@@ -2801,6 +2802,7 @@ struct alignas(128) Device
     bool ray_tracing_maintenance1_supported = false;
     bool null_descriptor_supported = false;
 
+    void* window = nullptr;
     VkSurfaceKHR vk_surface = nullptr;
     VkDebugUtilsMessengerEXT vk_debug_utils_messenger = nullptr;
     DebugUtilsFunctions debug_utils;
@@ -5636,6 +5638,7 @@ Device::Device(const DeviceConfig& config, u32 device_index) : device_index(devi
 
     if (config.window)
     {
+        window = config.window;
 #if defined(GFX_WINDOW_WIN32)
         const VkWin32SurfaceCreateInfoKHR surface_info =
         {
@@ -5680,8 +5683,7 @@ void Device::Initialize()
     temp_allocator.Initialize(*this);
     bindless_resource_pool.Initialize(*this);
 
-    if (vk_surface)
-        RecreateSwapchain();
+    RecreateSwapchainIfNeeded();
 
     if (features & (Feature::RayTracing | Feature::RayQuery))
     {
@@ -5824,7 +5826,7 @@ Handle<ShaderModule> Device::CreateShader(const ShaderDesc& desc)
     ShaderModule& shader = handle.Get();
     shader.vk_shader_module = vk_module;
     shader.stage = desc.stage;
-    strcpy_s(shader.entry_name, entry_name);
+    snprintf(shader.entry_name, sizeof(shader.entry_name), "%s", entry_name);
 
     if (desc.debug_name)
     {
@@ -6772,17 +6774,7 @@ Frame Device::NewFrame()
     temp_allocator.NewFrame(frame_index);
     last_frame_index = frame_index;
 
-    swapchain_valid = vk_surface != nullptr;
-    if (swapchain_valid)
-    {
-        VkSurfaceCapabilitiesKHR capabilities;
-        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, vk_surface, &capabilities));
-        const VkExtent2D surface_extent = capabilities.currentExtent;
-        const bool resized = !swapchain.vk_swapchain || surface_extent.width != swapchain.extent.x || surface_extent.height != swapchain.extent.y;
-        swapchain_valid = surface_extent.width != 0 && surface_extent.height != 0;
-        if (swapchain_valid && (resized || swapchain.needs_recreation))
-            swapchain_valid = RecreateSwapchain();
-    }
+    swapchain_valid = RecreateSwapchainIfNeeded();
 
     return
     {
@@ -7725,13 +7717,30 @@ u64 Device::FlushUploads()
     return last_upload_value;
 }
 
-bool Device::RecreateSwapchain()
+bool Device::RecreateSwapchainIfNeeded()
 {
+    if (!vk_surface)
+        return false;
+
     VkSurfaceCapabilitiesKHR capabilities;
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, vk_surface, &capabilities));
-    const VkExtent2D extent = capabilities.currentExtent;
+    VkExtent2D extent = capabilities.currentExtent;
+#if defined(GFX_WINDOW_GLFW)
+    if (extent.width == UINT32_MAX)
+    {
+        int width = 0;
+        int height = 0;
+        glfwGetFramebufferSize(static_cast<GLFWwindow*>(window), &width, &height);
+        extent.width = static_cast<u32>(width);
+        extent.height = static_cast<u32>(height);
+    }
+#endif
     if (extent.width == 0 || extent.height == 0)
         return false;
+
+    const bool resized = !swapchain.vk_swapchain || extent.width != swapchain.extent.x || extent.height != swapchain.extent.y;
+    if (!resized && !swapchain.needs_recreation)
+        return true;
 
     const VkSwapchainKHR old_swapchain = swapchain.vk_swapchain;
     if (old_swapchain)
@@ -7929,7 +7938,7 @@ void Device::EnableExtension(const char* name)
         return;
 
     VkExtensionProperties extension = {};
-    strncpy_s(extension.extensionName, name, _TRUNCATE);
+    snprintf(extension.extensionName, sizeof(extension.extensionName), "%s", name);
     device_extensions.push_back(extension);
 }
 
