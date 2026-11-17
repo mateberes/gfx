@@ -505,6 +505,11 @@ class Owned
         return handle.IsValid();
     }
 
+    GFX_FORCEINLINE typename Handle<T>::SizeType Index() const
+    {
+        return handle.Index();
+    }
+
     GFX_FORCEINLINE T& Get() const
     {
         return gfx::Get(handle);

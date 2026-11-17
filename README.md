@@ -129,9 +129,19 @@ If you want to use layout validation, include `gfx_shared.h` from C++ and GLSL
 
 
 ## Samples
-`samples/triangle` small triange demo
+`samples/triangle` Small triangle demo
 
-`samples/minimal_rt` simple picapica ray traced scene
+`samples/minimal_rt` Simple picapica scene, HW RT
+
+`samples/pathtracer` GPU path traced Bistro, ray queries
+
+
+## Building the samples
+Requires the Vulkan SDK (`VULKAN_SDK` set) and Visual Studio 2022+
+
+Run `samples\build_samples.bat`
+
+Compiled executable go to `bin/x64/Release/<sample>/`
 
 
 ## Requirements

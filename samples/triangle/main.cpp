@@ -1,6 +1,6 @@
 #define GFX_IMPLEMENTATION
 #define GFX_WINDOW_WIN32
-#include "common/samples_common.h"
+#include "includes/samples_common.h"
 #include "gfx.h"
 
 int main()
