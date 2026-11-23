@@ -13,6 +13,15 @@ It's designed to be simple to use: it wraps the tedious parts of Vulkan (descrip
 * **Supports graphics, compute, mesh shaders, ray tracing pipelines and ray queries**
 * **No per frame heap allocations**
 
+## Showcase
+<p align="center">  
+  <img src="images/god.png" width="98%" alt="flying world">
+  <img src="images/picapica.png" width="49%" alt="picapica">
+  <img src="images/picapica_emissive.png" width="49%" alt="picapica emissive">
+  <img src="images/spaceship.png" width="49%" alt="spaceship">
+  <img src="images/bistro.png" width="49%" alt="bistro">
+</p>
+
 ## Usage
 In exactly one .cpp file:
 
@@ -23,15 +32,6 @@ In exactly one .cpp file:
 ```
 
 Everywhere else just include `gfx.h`.
-
-## Showcase
-<p align="center">  
-  <img src="images/god.png" width="98%" alt="flying world">
-  <img src="images/picapica.png" width="49%" alt="picapica">
-  <img src="images/picapica_emissive.png" width="49%" alt="picapica emissive">
-  <img src="images/spaceship.png" width="49%" alt="spaceship">
-  <img src="images/bistro.png" width="49%" alt="bistro">
-</p>
 
 ## Requirements
 * A GPU and driver with Vulkan 1.3
