@@ -64,7 +64,10 @@
 #define GFX_MAX_COLOR_TARGETS 5
 #endif
 #ifndef GFX_MAX_COMMAND_SLOTS
-#define GFX_MAX_COMMAND_SLOTS 64
+#define GFX_MAX_COMMAND_SLOTS 4
+#endif
+#ifndef GFX_MAX_UPLOAD_COMMAND_SLOTS
+#define GFX_MAX_UPLOAD_COMMAND_SLOTS 64
 #endif
 #ifndef GFX_API_VERSION
 #define GFX_API_VERSION VK_API_VERSION_1_3
@@ -110,7 +113,12 @@
 #define GFX_FORCEINLINE __forceinline
 #endif
 #define GFX_NOEXCEPT noexcept
-#define GFX_ASSERT(x)                                                       \
+#if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER < 1950
+#define GFX_CONSTEVAL constexpr
+#else
+#define GFX_CONSTEVAL consteval
+#endif
+#define GFX_ASSERT(x)                                                     \
     do                                                                      \
     {                                                                       \
         if (!(x))                                                           \
@@ -298,6 +306,19 @@ class Span
   private:
     T* m_data = nullptr;
     size_t m_size = 0;
+};
+
+struct StaticString
+{
+    StaticString() = default;
+
+    template <size_t N>
+    GFX_CONSTEVAL StaticString(const char (&str)[N])
+        : value(str)
+    {
+    }
+
+    const char* value = nullptr;
 };
 
 #ifdef GFX_USE_GLM
@@ -1838,7 +1859,7 @@ struct StencilTarget
 
 struct RenderPassDesc
 {
-    const char* debug_name = nullptr;
+    StaticString debug_name;
     Vec3 debug_color = { 0.0f, 1.0f, 0.0f };
     Span<ColorTarget> color_targets;
     DepthTarget depth_target = {};
@@ -1849,7 +1870,7 @@ struct RenderPassDesc
 
 struct ComputePassDesc
 {
-    const char* debug_name = nullptr;
+    StaticString debug_name;
     Vec3 debug_color = { 0.0f, 1.0f, 0.0f };
     Span<PassResource> inputs = {};
     Span<PassResource> outputs = {};
@@ -4629,10 +4650,10 @@ void CommandBuffer::BeginRenderPass(const RenderPassDesc& desc)
 
     FlushBarriers();
 
-    if (desc.debug_name)
+    if (desc.debug_name.value)
     {
-        BeginPassTiming(desc.debug_name);
-        BeginDebugLabel(desc.debug_name, desc.debug_color);
+        BeginPassTiming(desc.debug_name.value);
+        BeginDebugLabel(desc.debug_name.value, desc.debug_color);
         timed_pass = true;
     }
 
@@ -4767,10 +4788,10 @@ void CommandBuffer::BeginComputePass(const ComputePassDesc& desc)
 
     FlushBarriers();
 
-    if (desc.debug_name)
+    if (desc.debug_name.value)
     {
-        BeginPassTiming(desc.debug_name);
-        BeginDebugLabel(desc.debug_name, desc.debug_color);
+        BeginPassTiming(desc.debug_name.value);
+        BeginDebugLabel(desc.debug_name.value, desc.debug_color);
         timed_pass = true;
     }
 }
@@ -7390,7 +7411,7 @@ void Device::CreateLogicalDevice(const DeviceConfig& config)
     enabled_features.core13.pNext = extension_features.Link(features, nullptr);
 
     graphics_queue.Initialize(*this, graphics_queue_family, GFX_MAX_COMMAND_SLOTS);
-    upload_queue.Initialize(*this, graphics_queue_family, GFX_MAX_COMMAND_SLOTS);
+    upload_queue.Initialize(*this, graphics_queue_family, GFX_MAX_UPLOAD_COMMAND_SLOTS);
 
     LogDeviceInfo(config.required_features | config.optional_features);
 }

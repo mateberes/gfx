@@ -1,0 +1,105 @@
+#version 460
+
+#include "gi_shared.h"
+#include "gfx_bindless.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PushConstant
+{
+    SvgfConstants pc;
+};
+
+const float KERNEL[3] = float[](3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+const float GAUSSIAN[2] = float[](1.0 / 4.0, 1.0 / 8.0);
+const float NORMAL_POWER = 128.0;
+const float PLANE_SIGMA = 0.02;
+const float LUMINANCE_SIGMA = 4.0;
+const float EPSILON = 0.0001;
+
+vec2 PrefilterVariance(ivec2 pixel, ivec2 size)
+{
+    vec2 variance = vec2(0.0);
+    float total_weight = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            const ivec2 tap = pixel + ivec2(x, y);
+            if (!IsInside(tap, size))
+                continue;
+
+            const float weight = GAUSSIAN[abs(x)] * GAUSSIAN[abs(y)];
+            const float diffuse = imageLoad(read_images_2d[pc.diffuse_input_index], tap).a;
+            const float specular = imageLoad(read_images_2d[pc.specular_input_index], tap).a;
+            variance += vec2(diffuse, specular) * weight;
+            total_weight += weight;
+        }
+    }
+    return variance / total_weight;
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(images_2d[pc.diffuse_output_index]);
+    if (any(greaterThanEqual(pixel, size)))
+        return;
+
+    const vec4 diffuse_center = imageLoad(read_images_2d[pc.diffuse_input_index], pixel);
+    const vec4 specular_center = imageLoad(read_images_2d[pc.specular_input_index], pixel);
+    const vec4 normal_depth = imageLoad(read_images_2d[pc.normal_depth_index], pixel);
+    if (normal_depth.w <= 0.0)
+    {
+        imageStore(images_2d[pc.diffuse_output_index], pixel, diffuse_center);
+        imageStore(images_2d[pc.specular_output_index], pixel, specular_center);
+        return;
+    }
+
+    const vec3 position = ReconstructPosition(pixel, normal_depth.w);
+    const vec2 luminance = vec2(Luminance(diffuse_center.rgb), Luminance(specular_center.rgb));
+    const vec2 luminance_scale = LUMINANCE_SIGMA * sqrt(PrefilterVariance(pixel, size)) + EPSILON;
+
+    const float center_weight = KERNEL[0] * KERNEL[0];
+    vec3 diffuse = diffuse_center.rgb * center_weight;
+    vec3 specular = specular_center.rgb * center_weight;
+    vec2 variance = vec2(diffuse_center.a, specular_center.a) * center_weight * center_weight;
+    vec2 total_weight = vec2(center_weight);
+
+    for (int y = -2; y <= 2; ++y)
+    {
+        for (int x = -2; x <= 2; ++x)
+        {
+            if (x == 0 && y == 0)
+                continue;
+
+            const ivec2 tap = pixel + ivec2(x, y) * int(pc.step_size);
+            if (!IsInside(tap, size))
+                continue;
+
+            const vec4 tap_normal_depth = imageLoad(read_images_2d[pc.normal_depth_index], tap);
+            if (tap_normal_depth.w <= 0.0)
+                continue;
+
+            const vec4 tap_diffuse = imageLoad(read_images_2d[pc.diffuse_input_index], tap);
+            const vec4 tap_specular = imageLoad(read_images_2d[pc.specular_input_index], tap);
+            const float plane_distance = abs(dot(normal_depth.xyz, ReconstructPosition(tap, tap_normal_depth.w) - position));
+
+            const float normal_weight = pow(max(dot(normal_depth.xyz, tap_normal_depth.xyz), 0.0), NORMAL_POWER);
+            const float depth_weight = exp(-plane_distance / (PLANE_SIGMA * normal_depth.w));
+            const float geometry_weight = KERNEL[abs(x)] * KERNEL[abs(y)] * normal_weight * depth_weight;
+
+            const vec2 tap_luminance = vec2(Luminance(tap_diffuse.rgb), Luminance(tap_specular.rgb));
+            const vec2 weight = geometry_weight * exp(-abs(luminance - tap_luminance) / luminance_scale);
+
+            diffuse += tap_diffuse.rgb * weight.x;
+            specular += tap_specular.rgb * weight.y;
+            variance += vec2(tap_diffuse.a, tap_specular.a) * weight * weight;
+            total_weight += weight;
+        }
+    }
+
+    const vec2 output_variance = variance / (total_weight * total_weight);
+    imageStore(images_2d[pc.diffuse_output_index], pixel, vec4(diffuse / total_weight.x, output_variance.x));
+    imageStore(images_2d[pc.specular_output_index], pixel, vec4(specular / total_weight.y, output_variance.y));
+}

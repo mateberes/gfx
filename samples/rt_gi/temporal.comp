@@ -1,0 +1,153 @@
+#version 460
+
+#include "gi_shared.h"
+#include "gfx_bindless.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PushConstant
+{
+    TemporalConstants pc;
+};
+
+const float DEPTH_TOLERANCE = 0.1;
+const float NORMAL_TOLERANCE = 0.9;
+const float MIN_HISTORY_WEIGHT = 0.01;
+const float MIN_SPECULAR_HISTORY = 2.0;
+const float SPATIAL_VARIANCE_HISTORY = 4.0;
+const int SPATIAL_VARIANCE_RADIUS = 3;
+const float SPATIAL_NORMAL_POWER = 128.0;
+
+struct History
+{
+    vec3 diffuse;
+    vec3 specular;
+    vec4 moments;
+    vec2 frames;
+};
+
+History ReprojectHistory(ivec2 pixel, ivec2 size, vec4 normal_depth)
+{
+    History history = History(vec3(0.0), vec3(0.0), vec4(0.0), vec2(0.0));
+    if (pc.reset != 0)
+        return history;
+
+    const vec4 prev_pixel = imageLoad(read_images_2d[pc.motion_index], pixel);
+    const ivec2 base_tap = ivec2(floor(prev_pixel.xy));
+    const vec2 fraction = fract(prev_pixel.xy);
+
+    float total_weight = 0.0;
+    for (int y = 0; y < 2; ++y)
+    {
+        for (int x = 0; x < 2; ++x)
+        {
+            const ivec2 tap = base_tap + ivec2(x, y);
+            if (!IsInside(tap, size))
+                continue;
+
+            const vec4 prev_normal_depth = imageLoad(read_images_2d[pc.prev_normal_depth_index], tap);
+            if (prev_normal_depth.w <= 0.0)
+                continue;
+            if (abs(prev_normal_depth.w - prev_pixel.z) > DEPTH_TOLERANCE * prev_pixel.z)
+                continue;
+            if (dot(prev_normal_depth.xyz, normal_depth.xyz) < NORMAL_TOLERANCE)
+                continue;
+
+            const vec2 axis_weights = mix(1.0 - fraction, fraction, vec2(x, y));
+            const float weight = axis_weights.x * axis_weights.y;
+            const vec4 diffuse = imageLoad(read_images_2d[pc.prev_diffuse_history_index], tap);
+            const vec4 specular = imageLoad(read_images_2d[pc.prev_specular_history_index], tap);
+            history.diffuse += diffuse.rgb * weight;
+            history.specular += specular.rgb * weight;
+            history.frames += vec2(diffuse.a, specular.a) * weight;
+            history.moments += imageLoad(read_images_2d[pc.prev_moments_history_index], tap) * weight;
+            total_weight += weight;
+        }
+    }
+
+    if (total_weight < MIN_HISTORY_WEIGHT)
+        return History(vec3(0.0), vec3(0.0), vec4(0.0), vec2(0.0));
+
+    history.diffuse /= total_weight;
+    history.specular /= total_weight;
+    history.moments /= total_weight;
+    history.frames = floor(history.frames / total_weight + 0.5);
+    return history;
+}
+
+vec2 FilterMoments(ivec2 pixel, ivec2 size, vec4 normal_depth)
+{
+    vec4 moments = vec4(0.0);
+    float total_weight = 0.0;
+    for (int y = -SPATIAL_VARIANCE_RADIUS; y <= SPATIAL_VARIANCE_RADIUS; ++y)
+    {
+        for (int x = -SPATIAL_VARIANCE_RADIUS; x <= SPATIAL_VARIANCE_RADIUS; ++x)
+        {
+            const ivec2 tap = pixel + ivec2(x, y);
+            if (!IsInside(tap, size))
+                continue;
+
+            const vec4 tap_normal_depth = imageLoad(read_images_2d[pc.normal_depth_index], tap);
+            if (tap_normal_depth.w <= 0.0)
+                continue;
+            if (abs(tap_normal_depth.w - normal_depth.w) > DEPTH_TOLERANCE * normal_depth.w)
+                continue;
+
+            const float weight = pow(max(dot(tap_normal_depth.xyz, normal_depth.xyz), 0.0), SPATIAL_NORMAL_POWER);
+            const float diffuse = Luminance(imageLoad(read_images_2d[pc.diffuse_index], tap).rgb);
+            const float specular = Luminance(imageLoad(read_images_2d[pc.specular_index], tap).rgb);
+            moments += vec4(diffuse, diffuse * diffuse, specular, specular * specular) * weight;
+            total_weight += weight;
+        }
+    }
+
+    moments /= max(total_weight, MIN_HISTORY_WEIGHT);
+    return max(moments.yw - moments.xz * moments.xz, vec2(0.0));
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(images_2d[pc.diffuse_output_index]);
+    if (any(greaterThanEqual(pixel, size)))
+        return;
+
+    const vec4 normal_depth = imageLoad(read_images_2d[pc.normal_depth_index], pixel);
+    if (normal_depth.w <= 0.0)
+    {
+        imageStore(images_2d[pc.diffuse_history_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.specular_history_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.moments_history_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.diffuse_output_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.specular_output_index], pixel, vec4(0.0));
+        return;
+    }
+
+    const vec3 diffuse_sample = imageLoad(read_images_2d[pc.diffuse_index], pixel).rgb;
+    const vec3 specular_sample = imageLoad(read_images_2d[pc.specular_index], pixel).rgb;
+    const float diffuse_luminance = Luminance(diffuse_sample);
+    const float specular_luminance = Luminance(specular_sample);
+    const vec4 sample_moments = vec4(diffuse_luminance, diffuse_luminance * diffuse_luminance, specular_luminance, specular_luminance * specular_luminance);
+
+    const float roughness = imageLoad(read_images_2d[pc.specular_albedo_index], pixel).a;
+    const float history_limit = float(pc.history_limit);
+    const vec2 frame_limit = vec2(history_limit, mix(MIN_SPECULAR_HISTORY, history_limit, roughness));
+
+    const History history = ReprojectHistory(pixel, size, normal_depth);
+    const vec2 frames = min(history.frames + 1.0, frame_limit);
+    const vec2 alpha = 1.0 / frames;
+
+    const vec3 diffuse = mix(history.diffuse, diffuse_sample, alpha.x);
+    const vec3 specular = mix(history.specular, specular_sample, alpha.y);
+    const vec4 moments = mix(history.moments, sample_moments, alpha.xxyy);
+
+    vec2 variance = max(moments.yw - moments.xz * moments.xz, vec2(0.0));
+    if (any(lessThan(frames, vec2(SPATIAL_VARIANCE_HISTORY))))
+        variance = mix(variance, FilterMoments(pixel, size, normal_depth) * SPATIAL_VARIANCE_HISTORY / frames, lessThan(frames, vec2(SPATIAL_VARIANCE_HISTORY)));
+
+    imageStore(images_2d[pc.diffuse_history_index], pixel, vec4(diffuse, frames.x));
+    imageStore(images_2d[pc.specular_history_index], pixel, vec4(specular, frames.y));
+    imageStore(images_2d[pc.moments_history_index], pixel, moments);
+    imageStore(images_2d[pc.diffuse_output_index], pixel, vec4(diffuse, variance.x));
+    imageStore(images_2d[pc.specular_output_index], pixel, vec4(specular, variance.y));
+}

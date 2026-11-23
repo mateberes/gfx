@@ -62,7 +62,6 @@ int main()
     device.Destroy(vertex_shader);
     device.Destroy(fragment_shader);
 
-    gfx::DestroyDevice(device);
-    window.Close();
+    gfx::DestroyDevice(device);    
     return 0;
 }

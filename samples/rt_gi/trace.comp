@@ -1,0 +1,377 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+#define GFX_BINDLESS_RAY_TRACING
+#include "gi_shared.h"
+#include "gfx_bindless.h"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PushConstant
+{
+    TraceConstants pc;
+};
+
+const float PI = 3.14159265359;
+const float MAX_RAY_DIST = 1000.0;
+const float RAY_OFFSET = 0.01;
+const float SUN_CONE_ANGLE = 0.005;
+const float MIN_DOT = 0.0001;
+const float MIN_ROUGHNESS = 0.05;
+const float MAX_INDIRECT_LUMINANCE = 2.0;
+const vec3 SKY_HORIZON = vec3(0.5, 0.58, 0.7);
+const vec3 SKY_ZENITH = vec3(0.16, 0.3, 0.6);
+
+struct Hit
+{
+    bool hit;
+    float t;
+    uint instance;
+    uint primitive;
+    vec2 barycentrics;
+    mat4x3 object_to_world;
+    mat4x3 world_to_object;
+};
+
+struct Surface
+{
+    vec3 geometric_normal;
+    vec3 shading_normal;
+    vec3 albedo;
+    vec3 f0;
+    vec3 emissive;
+    float roughness;
+};
+
+struct LightSample
+{
+    vec3 direction;
+    vec3 radiance;
+};
+
+struct Brdf
+{
+    vec3 diffuse;
+    vec3 specular;
+};
+
+uint PcgHash(uint value)
+{
+    const uint state = value * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float RandomFloat(inout uint state)
+{
+    state = PcgHash(state);
+    return float(state) * 2.3283064365386963e-10;
+}
+
+vec2 RandomVec2(inout uint state)
+{
+    return vec2(RandomFloat(state), RandomFloat(state));
+}
+
+uvec3 ReadTriangle(Mesh mesh, uint primitive)
+{
+    const uint first = primitive * 3;
+    return uvec3(mesh.indices.values[first], mesh.indices.values[first + 1], mesh.indices.values[first + 2]);
+}
+
+vec3 ReadVec3(Floats values, uint index)
+{
+    return vec3(values.values[index * 3], values.values[index * 3 + 1], values.values[index * 3 + 2]);
+}
+
+vec2 ReadVec2(Floats values, uint index)
+{
+    return vec2(values.values[index * 2], values.values[index * 2 + 1]);
+}
+
+vec3 Weights(vec2 barycentrics)
+{
+    return vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
+}
+
+vec2 InterpolateUv(Mesh mesh, uvec3 triangle, vec3 weights)
+{
+    return ReadVec2(mesh.uvs, triangle.x) * weights.x + ReadVec2(mesh.uvs, triangle.y) * weights.y + ReadVec2(mesh.uvs, triangle.z) * weights.z;
+}
+
+bool IsOpaque(rayQueryEXT query)
+{
+    Mesh mesh = pc.meshes.values[rayQueryGetIntersectionInstanceCustomIndexEXT(query, false)];
+    const uvec3 triangle = ReadTriangle(mesh, rayQueryGetIntersectionPrimitiveIndexEXT(query, false));
+    const vec2 uv = InterpolateUv(mesh, triangle, Weights(rayQueryGetIntersectionBarycentricsEXT(query, false)));
+    const float alpha = mesh.albedo.a * textureLod(textures_2d[nonuniformEXT(mesh.albedo_index)], uv, 0.0).a;
+    return alpha >= mesh.alpha_cutoff;
+}
+
+Hit TraceScene(vec3 origin, vec3 direction, float max_distance)
+{
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, tlas[pc.tlas_index], gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, direction, max_distance);
+    while (rayQueryProceedEXT(query))
+    {
+        if (IsOpaque(query))
+            rayQueryConfirmIntersectionEXT(query);
+    }
+
+    Hit hit;
+    hit.hit = rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+    if (hit.hit)
+    {
+        hit.t = rayQueryGetIntersectionTEXT(query, true);
+        hit.instance = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true);
+        hit.primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+        hit.barycentrics = rayQueryGetIntersectionBarycentricsEXT(query, true);
+        hit.object_to_world = rayQueryGetIntersectionObjectToWorldEXT(query, true);
+        hit.world_to_object = rayQueryGetIntersectionWorldToObjectEXT(query, true);
+    }
+    return hit;
+}
+
+bool IsVisible(vec3 origin, vec3 direction, float max_distance)
+{
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, tlas[pc.tlas_index], gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, direction, max_distance);
+    while (rayQueryProceedEXT(query))
+    {
+        if (IsOpaque(query))
+            rayQueryConfirmIntersectionEXT(query);
+    }
+    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+Surface GetSurface(Hit hit, vec3 direction)
+{
+    Mesh mesh = pc.meshes.values[hit.instance];
+    const uvec3 triangle = ReadTriangle(mesh, hit.primitive);
+    const vec3 weights = Weights(hit.barycentrics);
+
+    const vec3 p0 = hit.object_to_world * vec4(ReadVec3(mesh.positions, triangle.x), 1.0);
+    const vec3 p1 = hit.object_to_world * vec4(ReadVec3(mesh.positions, triangle.y), 1.0);
+    const vec3 p2 = hit.object_to_world * vec4(ReadVec3(mesh.positions, triangle.z), 1.0);
+    vec3 geometric_normal = normalize(cross(p1 - p0, p2 - p0));
+
+    const vec3 object_normal = ReadVec3(mesh.normals, triangle.x) * weights.x + ReadVec3(mesh.normals, triangle.y) * weights.y + ReadVec3(mesh.normals, triangle.z) * weights.z;
+    vec3 shading_normal = normalize(vec3(object_normal * hit.world_to_object));
+
+    if (dot(geometric_normal, direction) > 0.0)
+        geometric_normal = -geometric_normal;
+    if (dot(shading_normal, geometric_normal) < 0.0)
+        shading_normal = -shading_normal;
+
+    const vec2 uv = InterpolateUv(mesh, triangle, weights);
+    const vec3 base_color = mesh.albedo.rgb * textureLod(textures_2d[nonuniformEXT(mesh.albedo_index)], uv, 0.0).rgb;
+
+    Surface surface;
+    surface.geometric_normal = geometric_normal;
+    surface.shading_normal = shading_normal;
+    surface.emissive = mesh.emissive.rgb;
+    surface.f0 = mix(vec3(0.04), base_color, mesh.metallic);
+    surface.albedo = base_color * (1.0 - mesh.metallic);
+    surface.roughness = max(mesh.roughness, MIN_ROUGHNESS);
+    return surface;
+}
+
+vec3 SampleSkyColor(vec3 direction)
+{
+    return mix(SKY_HORIZON, SKY_ZENITH, clamp(direction.y, 0.0, 1.0));
+}
+
+mat3 GetTangentSpace(vec3 normal)
+{
+    const float s = normal.z >= 0.0 ? 1.0 : -1.0;
+    const float a = -1.0 / (s + normal.z);
+    const float b = normal.x * normal.y * a;
+    const vec3 tangent = vec3(1.0 + s * normal.x * normal.x * a, s * b, -s * normal.x);
+    const vec3 bitangent = vec3(b, s + normal.y * normal.y * a, -normal.y);
+    return mat3(tangent, bitangent, normal);
+}
+
+vec3 SampleCosineHemisphere(vec2 rand)
+{
+    const float radius = sqrt(rand.x);
+    const float phi = 2.0 * PI * rand.y;
+    return vec3(radius * cos(phi), radius * sin(phi), sqrt(max(1.0 - rand.x, 0.0)));
+}
+
+vec3 SampleSunCone(float cone_angle, vec2 rand)
+{
+    const float cos_theta = mix(1.0, cos(cone_angle), rand.x);
+    const float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    const float phi = 2.0 * PI * rand.y;
+    const vec3 local_dir = vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+    return normalize(GetTangentSpace(frame.sun_direction.xyz) * local_dir);
+}
+
+vec3 SampleGGXHalfVector(vec2 rand, float alpha)
+{
+    const float phi = 2.0 * PI * rand.x;
+    const float cos_theta = sqrt((1.0 - rand.y) / (1.0 + (alpha * alpha - 1.0) * rand.y));
+    const float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+    return vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+}
+
+vec3 FresnelSchlick(float cos_theta, vec3 f0)
+{
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+vec3 FresnelSchlickRoughness(float cos_theta, vec3 f0, float roughness)
+{
+    return f0 + (max(vec3(1.0 - roughness), f0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+float DistributionGGX(float NdotH, float roughness)
+{
+    const float alpha = roughness * roughness;
+    const float alpha2 = alpha * alpha;
+    const float denominator = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+    return alpha2 / (PI * denominator * denominator);
+}
+
+float GeometrySchlickGGX(float NdotX, float roughness)
+{
+    const float r = roughness + 1.0;
+    const float k = r * r / 8.0;
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+float GeometrySmith(float NdotV, float NdotL, float roughness)
+{
+    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
+}
+
+vec3 DiffuseAlbedo(Surface surface, float NdotV)
+{
+    const vec3 F = FresnelSchlickRoughness(NdotV, surface.f0, surface.roughness);
+    return surface.albedo * (1.0 - F);
+}
+
+vec3 ClampLuminance(vec3 color, float max_luminance)
+{
+    const float luminance = Luminance(color);
+    if (luminance <= max_luminance)
+        return color;
+
+    return color * (max_luminance / luminance);
+}
+
+LightSample SampleSun(Surface surface, vec3 position, inout uint rng_state)
+{
+    const vec3 L = SampleSunCone(SUN_CONE_ANGLE, RandomVec2(rng_state));
+    const bool lit = dot(surface.shading_normal, L) > 0.0 && dot(surface.geometric_normal, L) > 0.0 && IsVisible(position, L, MAX_RAY_DIST);
+    return LightSample(L, lit ? frame.sun_color.rgb : vec3(0.0));
+}
+
+Brdf EvaluateBrdf(Surface surface, vec3 V, vec3 L)
+{
+    const vec3 N = surface.shading_normal;
+    const vec3 H = normalize(V + L);
+    const float NdotL = max(dot(N, L), 0.0);
+    const float NdotV = max(dot(N, V), MIN_DOT);
+    const float NdotH = max(dot(N, H), MIN_DOT);
+    const float D = DistributionGGX(NdotH, surface.roughness);
+    const float G = GeometrySmith(NdotV, NdotL, surface.roughness);
+    const vec3 F = FresnelSchlick(max(dot(V, H), MIN_DOT), surface.f0);
+    return Brdf(vec3(NdotL / PI), D * G * F / (4.0 * NdotV));
+}
+
+vec3 TraceBounce(vec3 origin, vec3 dir, inout uint rng_state)
+{
+    const Hit hit = TraceScene(origin, dir, MAX_RAY_DIST);
+    if (!hit.hit)
+        return SampleSkyColor(dir);
+
+    const Surface surface = GetSurface(hit, dir);
+    const vec3 position = origin + hit.t * dir + surface.geometric_normal * RAY_OFFSET;
+    const vec3 V = -dir;
+    const LightSample sun = SampleSun(surface, position, rng_state);
+    const Brdf brdf = EvaluateBrdf(surface, V, sun.direction);
+    const vec3 radiance = surface.emissive + (DiffuseAlbedo(surface, max(dot(surface.shading_normal, V), MIN_DOT)) * brdf.diffuse + brdf.specular) * sun.radiance;
+    return ClampLuminance(radiance, MAX_INDIRECT_LUMINANCE);
+}
+
+vec2 PreviousPixel(vec3 position)
+{
+    const vec4 clip = frame.prev_view_projection * vec4(position, 1.0);
+    if (clip.w <= 0.0)
+        return vec2(-1.0);
+
+    const vec2 ndc = clip.xy / clip.w;
+    return (ndc * 0.5 + 0.5) / frame.pixel_size.xy - 0.5;
+}
+
+void main()
+{
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(images_2d[pc.direct_index]);
+    if (any(greaterThanEqual(pixel, size)))
+        return;
+
+    const uint pixel_seed = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u;
+    uint rng_state = PcgHash(pixel_seed + frame.frame_index * 26699u);
+
+    const vec3 origin = frame.position.xyz;
+    const vec3 dir = CameraRay(vec2(pixel) + 0.5);
+
+    const Hit hit = TraceScene(origin, dir, MAX_RAY_DIST);
+    if (!hit.hit)
+    {
+        imageStore(images_2d[pc.direct_index], pixel, vec4(SampleSkyColor(dir), 1.0));
+        imageStore(images_2d[pc.diffuse_albedo_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.specular_albedo_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.diffuse_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.specular_index], pixel, vec4(0.0));
+        imageStore(images_2d[pc.motion_index], pixel, vec4(-1.0));
+        imageStore(images_2d[pc.normal_depth_index], pixel, vec4(0.0));
+        return;
+    }
+
+    const Surface surface = GetSurface(hit, dir);
+    const vec3 N = surface.shading_normal;
+    const vec3 V = -dir;
+    const float NdotV = max(dot(N, V), MIN_DOT);
+    const vec3 F0 = surface.f0;
+    const vec3 hit_position = origin + hit.t * dir;
+    const vec3 position = hit_position + surface.geometric_normal * RAY_OFFSET;
+    const mat3 tbn = GetTangentSpace(N);
+
+    const vec3 diffuse_albedo = DiffuseAlbedo(surface, NdotV);
+    const vec3 specular_albedo = F0;
+
+    const LightSample sun = SampleSun(surface, position, rng_state);
+    const Brdf sun_brdf = EvaluateBrdf(surface, V, sun.direction);
+    const vec3 direct = surface.emissive + sun_brdf.specular * sun.radiance;
+
+    vec3 diffuse = sun_brdf.diffuse * sun.radiance;
+    const vec3 diffuse_dir = normalize(tbn * SampleCosineHemisphere(RandomVec2(rng_state)));
+    if (dot(surface.geometric_normal, diffuse_dir) > 0.0)
+        diffuse += TraceBounce(position, diffuse_dir, rng_state);
+
+    vec3 specular = vec3(0.0);
+    const float alpha = max(surface.roughness * surface.roughness, 0.001);
+    const vec3 H = normalize(tbn * SampleGGXHalfVector(RandomVec2(rng_state), alpha));
+    const vec3 specular_dir = reflect(-V, H);
+    const float NdotL = dot(N, specular_dir);
+    if (NdotL > 0.0 && dot(surface.geometric_normal, specular_dir) > 0.0)
+    {
+        const float NdotH = max(dot(N, H), MIN_DOT);
+        const float VdotH = max(dot(V, H), MIN_DOT);
+        const vec3 F = FresnelSchlick(VdotH, F0);
+        const float G = GeometrySmith(NdotV, NdotL, surface.roughness);
+        const vec3 weight = F * G * VdotH / (NdotV * NdotH);
+        specular = TraceBounce(position, specular_dir, rng_state) * weight / max(specular_albedo, vec3(MIN_DOT));
+    }
+
+    imageStore(images_2d[pc.direct_index], pixel, vec4(direct, 1.0));
+    imageStore(images_2d[pc.diffuse_albedo_index], pixel, vec4(diffuse_albedo, 1.0));
+    imageStore(images_2d[pc.specular_albedo_index], pixel, vec4(specular_albedo, surface.roughness));
+    imageStore(images_2d[pc.diffuse_index], pixel, vec4(diffuse, 1.0));
+    imageStore(images_2d[pc.specular_index], pixel, vec4(specular, 1.0));
+    imageStore(images_2d[pc.motion_index], pixel, vec4(PreviousPixel(hit_position), distance(hit_position, frame.prev_position.xyz), 0.0));
+    imageStore(images_2d[pc.normal_depth_index], pixel, vec4(N, hit.t));
+}

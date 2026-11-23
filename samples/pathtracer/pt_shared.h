@@ -18,8 +18,10 @@ struct Mesh
     float alpha_cutoff;
     float metallic;
     float roughness;
+    float transmission;
+    float ior;
 };
-GFX_LAYOUT(Mesh, GFX_MEMBERS(albedo, emissive, positions, normals, uvs, indices, albedo_index, alpha_cutoff, metallic, roughness))
+GFX_LAYOUT(Mesh, GFX_MEMBERS(albedo, emissive, positions, normals, uvs, indices, albedo_index, alpha_cutoff, metallic, roughness, transmission, ior))
 GFX_BUFFER(Meshes, Mesh, values, 16)
 
 struct FrameData

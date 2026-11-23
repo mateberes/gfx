@@ -21,26 +21,16 @@ set GLSLC="%VULKAN_SDK%\Bin\glslc.exe" -I src --target-env=vulkan1.3 -O
 set REFLECT=%VULKAN_SDK%\Source\SPIRV-Reflect
 
 if not exist %OBJ%\triangle mkdir %OBJ%\triangle
-if not exist %OBJ%\minimal_rt mkdir %OBJ%\minimal_rt
 if not exist %OUT%\triangle mkdir %OUT%\triangle
-if not exist %OUT%\minimal_rt mkdir %OUT%\minimal_rt
 if not exist %OBJ%\pathtracer mkdir %OBJ%\pathtracer
 if not exist %OUT%\pathtracer mkdir %OUT%\pathtracer
+if not exist %OBJ%\rt_gi mkdir %OBJ%\rt_gi
+if not exist %OUT%\rt_gi mkdir %OUT%\rt_gi
 
 echo building triangle
 %GLSLC% samples\triangle\triangle.vert -o %OUT%\triangle\triangle.vert.spv || exit /b 1
 %GLSLC% samples\triangle\triangle.frag -o %OUT%\triangle\triangle.frag.spv || exit /b 1
 cl %CFLAGS% samples\triangle\main.cpp /Fo%OBJ%\triangle\ /Fe%OUT%\triangle\triangle.exe %LFLAGS% || exit /b 1
-
-echo building minimal_rt
-%GLSLC% samples\minimal_rt\trace.rgen -o %OUT%\minimal_rt\trace.rgen.spv || exit /b 1
-%GLSLC% samples\minimal_rt\miss.rmiss -o %OUT%\minimal_rt\miss.rmiss.spv || exit /b 1
-%GLSLC% samples\minimal_rt\shadow.rmiss -o %OUT%\minimal_rt\shadow.rmiss.spv || exit /b 1
-%GLSLC% samples\minimal_rt\hit.rchit -o %OUT%\minimal_rt\hit.rchit.spv || exit /b 1
-%GLSLC% samples\minimal_rt\alpha.rahit -o %OUT%\minimal_rt\alpha.rahit.spv || exit /b 1
-%GLSLC% samples\minimal_rt\blit.vert -o %OUT%\minimal_rt\blit.vert.spv || exit /b 1
-%GLSLC% samples\minimal_rt\blit.frag -o %OUT%\minimal_rt\blit.frag.spv || exit /b 1
-cl %CFLAGS% samples\minimal_rt\main.cpp /Fo%OBJ%\minimal_rt\ /Fe%OUT%\minimal_rt\minimal_rt.exe %LFLAGS% || exit /b 1
 
 echo building pathtracer
 %GLSLC% samples\pathtracer\pathtrace.comp -o %OUT%\pathtracer\pathtrace.comp.spv || exit /b 1
@@ -48,5 +38,13 @@ echo building pathtracer
 %GLSLC% samples\pathtracer\tonemap.frag -o %OUT%\pathtracer\tonemap.frag.spv || exit /b 1
 cl /nologo /O2 /DNDEBUG /c "%REFLECT%\spirv_reflect.c" /Fo%OBJ%\pathtracer\ || exit /b 1
 cl %CFLAGS% /DGFX_USE_SPIRV_REFLECT=1 /I "%REFLECT%" samples\pathtracer\main.cpp %OBJ%\pathtracer\spirv_reflect.obj /Fo%OBJ%\pathtracer\ /Fe%OUT%\pathtracer\pathtracer.exe %LFLAGS% || exit /b 1
+
+echo building rt_gi
+%GLSLC% samples\rt_gi\trace.comp -o %OUT%\rt_gi\trace.comp.spv || exit /b 1
+%GLSLC% samples\rt_gi\temporal.comp -o %OUT%\rt_gi\temporal.comp.spv || exit /b 1
+%GLSLC% samples\rt_gi\svgf.comp -o %OUT%\rt_gi\svgf.comp.spv || exit /b 1
+%GLSLC% samples\rt_gi\fullscreen.vert -o %OUT%\rt_gi\fullscreen.vert.spv || exit /b 1
+%GLSLC% samples\rt_gi\composite.frag -o %OUT%\rt_gi\composite.frag.spv || exit /b 1
+cl %CFLAGS% /DGFX_USE_SPIRV_REFLECT=1 /I "%REFLECT%" samples\rt_gi\main.cpp %OBJ%\pathtracer\spirv_reflect.obj /Fo%OBJ%\rt_gi\ /Fe%OUT%\rt_gi\rt_gi.exe %LFLAGS% || exit /b 1
 
 echo done

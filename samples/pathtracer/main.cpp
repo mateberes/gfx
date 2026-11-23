@@ -5,13 +5,11 @@
 
 #include <chrono>
 
-constexpr const char* BISTRO_PATH = "../../../../data/bistro/bistro.gltf";
-constexpr const char* CAR_PATH = "../../../../data/336_lrm/scene.gltf";
+constexpr const char* SPACESHIP_PATH = "../../../../data/spaceship/spaceship_extended.gltf";
 constexpr u32 WHITE = 0xFFFFFFFFu;
 constexpr u32 HISTORY_LIMIT = 4096;
 constexpr f32 EXPOSURE = 1.0f;
-constexpr vec3 SUN_COLOR = {3.0f, 2.85f, 2.6f};
-constexpr f32 CAR_SCALE = 0.015f;
+constexpr vec3 SUN_COLOR = {0.0f, 0.0f, 0.0f};
 
 void Run(gfx::Device& device, Window& window, const SceneData& scene)
 {
@@ -101,6 +99,8 @@ void Run(gfx::Device& device, Window& window, const SceneData& scene)
             .alpha_cutoff = primitive.alpha_cutoff,
             .metallic = primitive.metallic,
             .roughness = primitive.roughness,
+            .transmission = primitive.transmission,
+            .ior = primitive.ior,
         });
 
         const gfx::Handle<gfx::AccelerationStructure> handle = device.CreateAccelerationStructure(
@@ -162,9 +162,10 @@ void Run(gfx::Device& device, Window& window, const SceneData& scene)
 
     Camera camera =
     {
-        .pos = {-26.4f, 3.2f, 11.2f},
-        .yaw = 1.86f,
-        .pitch = -0.1f,
+        .pos = {-0.52f, 0.82f, 3.82f},
+        .yaw = 0.137f,
+        .pitch = -0.052f,
+        .fov = 0.628f,
     };
 
     gfx::Vec2u radiance_size = {};
@@ -294,21 +295,8 @@ void Run(gfx::Device& device, Window& window, const SceneData& scene)
 int main()
 {
     SceneData scene;
-    if (!scene.Load(BISTRO_PATH))
-        GFX_LOG_FATAL("could not load %s", BISTRO_PATH);
-
-    const mat4 car_transform =
-    {
-        .columns =
-        {
-            {CAR_SCALE, 0.0f, 0.0f, 0.0f},
-            {0.0f, CAR_SCALE, 0.0f, 0.0f},
-            {0.0f, 0.0f, CAR_SCALE, 0.0f},
-            {-18.5f, 0.2f, 9.5f, 1.0f},
-        },
-    };
-    if (!scene.Load(CAR_PATH, car_transform))
-        GFX_LOG_FATAL("could not load %s", CAR_PATH);
+    if (!scene.Load(SPACESHIP_PATH))
+        GFX_LOG_FATAL("could not load %s", SPACESHIP_PATH);
 
     Window window;
     if (!window.Initialize(1280, 720, "pathtracer"))

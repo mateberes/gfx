@@ -156,6 +156,25 @@ inline vec3 Cross(vec3 a, vec3 b)
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
+inline mat4 GetViewProjectionMatrix(vec3 position, vec3 forward, vec3 right, vec3 up, f32 tan_half_fov, f32 aspect)
+{
+    const f32 scale_x = 1.0f / (tan_half_fov * aspect);
+    const f32 scale_y = -1.0f / tan_half_fov;
+    const f32 right_offset = right.x * position.x + right.y * position.y + right.z * position.z;
+    const f32 up_offset = up.x * position.x + up.y * position.y + up.z * position.z;
+    const f32 forward_offset = forward.x * position.x + forward.y * position.y + forward.z * position.z;
+    return
+    {
+        .columns =
+        {
+            {right.x * scale_x, up.x * scale_y, 0.0f, forward.x},
+            {right.y * scale_x, up.y * scale_y, 0.0f, forward.y},
+            {right.z * scale_x, up.z * scale_y, 0.0f, forward.z},
+            {-right_offset * scale_x, -up_offset * scale_y, 0.0f, -forward_offset},
+        },
+    };
+}
+
 struct Window
 {
     Window() = default;
@@ -391,6 +410,8 @@ struct Primitive
     f32 alpha_cutoff = 0.0f;
     f32 metallic = 0.0f;
     f32 roughness = 1.0f;
+    f32 transmission = 0.0f;
+    f32 ior = 1.5f;
 };
 
 struct Instance
@@ -447,6 +468,11 @@ inline void ReadMaterial(const cgltf_material& material, const std::string& fold
 
     if (material.alpha_mode == cgltf_alpha_mode_mask)
         primitive.alpha_cutoff = material.alpha_cutoff;
+
+    if (material.has_transmission)
+        primitive.transmission = material.transmission.transmission_factor;
+    if (material.has_ior)
+        primitive.ior = material.ior.ior;
 
     if (texture)
     {
@@ -546,7 +572,7 @@ inline bool SceneData::Load(const std::string& requested_path, const mat4& trans
             for (cgltf_size j = 0; j < node.mesh->primitives_count; ++j)
             {
                 const cgltf_material* material = node.mesh->primitives[j].material;
-                if (material && (material->has_transmission || material->alpha_mode == cgltf_alpha_mode_blend))
+                if (material && !material->has_transmission && material->alpha_mode == cgltf_alpha_mode_blend)
                     continue;
 
                 Instance instance =
